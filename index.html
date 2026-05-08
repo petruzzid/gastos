@@ -1854,6 +1854,79 @@ function reportes() {
 }
 
 // ─── VENCIMIENTOS ────────────────────────────────────────────────────────────
+function openPagarVencimiento(due, onDone) {
+  let selectedType='cuenta'; // 'cuenta' o 'tarjeta'
+  let selectedId='';
+  const body=h('div');
+
+  // Resumen del vencimiento
+  const resumen=h('div',{style:{background:G.accentDim,borderRadius:'12px',padding:'12px',marginBottom:'16px'}});
+  resumen.innerHTML=`<div style="font-weight:800;font-size:16px">${due.name}</div>
+    <div style="font-size:13px;color:${G.muted};margin-top:2px">${due.category}${due.bank?' · '+due.bank:''}</div>
+    <div class="mono" style="font-size:22px;font-weight:700;color:${G.red};margin-top:6px">${fmt(due.amount,due.currency)}</div>`;
+  body.appendChild(resumen);
+
+  function rb() {
+    // Limpiar todo excepto resumen
+    while(body.children.length > 1) body.removeChild(body.lastChild);
+
+    // Selector tipo de pago
+    const typeRow=h('div',{class:'field'},[h('label',{class:'field-label'},'¿Cómo pagás?')]);
+    const typePills=h('div',{style:{display:'flex',gap:'8px',marginBottom:'4px'}});
+    [['cuenta','🏦 Cuenta / Efectivo'],['tarjeta','💳 Tarjeta']].forEach(([v,l])=>{
+      const btn=h('button',{class:'pill'+(selectedType===v?' active':''),onClick:()=>{ selectedType=v; selectedId=''; rb(); }},l);
+      typePills.appendChild(btn);
+    });
+    typeRow.appendChild(typePills);
+    body.appendChild(typeRow);
+
+    if(selectedType==='cuenta') {
+      const opts=[['','Seleccioná una cuenta'],...DB.accounts.map(a=>[a.id,`${a.icon||'🏦'} ${a.name} (${fmt(a.balance,a.currency)})`])];
+      body.appendChild(makeField('Cuenta',makeSelect(opts,selectedId,v=>selectedId=v)));
+    } else {
+      const opts=[['','Seleccioná una tarjeta'],...DB.cards.map(c=>[c.id,c.name])];
+      body.appendChild(makeField('Tarjeta',makeSelect(opts,selectedId,v=>selectedId=v)));
+    }
+
+    // Fecha del pago
+    const dateInp=makeInput({type:'date',value:today()});
+    body.appendChild(makeField('Fecha del pago',dateInp));
+
+    const br=h('div',{class:'btn-row'});
+    br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
+    br.appendChild(makeBtn('✓ Confirmar pago',()=>{
+      const payDate=dateInp.value||today();
+      const cat=DB.categories.find(c=>c.name==='Impuesto'||c.name==='Servicios'||c.name===due.category);
+
+      // Crear movimiento
+      const mov={
+        id:uid(), type:'gasto',
+        description:`${due.category}: ${due.name}`,
+        amount:due.amount, currency:due.currency,
+        date:payDate, categoryId:cat?.id||'',
+        accountId: selectedType==='cuenta'?selectedId:null,
+        cardId: selectedType==='tarjeta'?selectedId:null,
+        pendingCard: selectedType==='tarjeta'  // si es tarjeta, es pendiente hasta pagar resumen
+      };
+      DB.movements.push(mov);
+
+      // Descontar de cuenta si aplica
+      if(selectedType==='cuenta' && selectedId) {
+        DB.accounts=DB.accounts.map(a=>a.id===selectedId?{...a,balance:a.balance-due.amount}:a);
+      }
+
+      // Marcar vencimiento como pagado con referencia al movimiento
+      DB.dues=DB.dues.map(x=>x.id===due.id?{...x,paid:true,movementId:mov.id,paidAt:payDate}:x);
+
+      saveDB(DB); closeModal(); onDone();
+    },'primary',{full:true}));
+    body.appendChild(br);
+  }
+
+  rb();
+  openModal(`Pagar: ${due.name}`,body);
+}
+
 function gcalLinkFromDue(d) {
   const dateStr=d.dueDate.replace(/-/g,'');
   const title=encodeURIComponent(`💸 ${d.category}: ${d.name}`);
@@ -1912,7 +1985,20 @@ function vencimientos() {
 
       const toggleBtn=h('button',{
         style:{flex:1,background:d.paid?'var(--cardAlt)':G.greenDim,border:`1.5px solid ${d.paid?G.border:G.green}`,borderRadius:'9px',padding:'9px 0',color:d.paid?G.muted:G.green,fontSize:'12px',fontWeight:700},
-        onClick:()=>{ DB.dues=DB.dues.map(x=>x.id===d.id?{...x,paid:!x.paid}:x); saveDB(DB); renderList(); }
+        onClick:()=>{
+          if(d.paid) {
+            // Desmarcar — revertir movimiento si existe
+            if(d.movementId) {
+              const mov=DB.movements.find(m=>m.id===d.movementId);
+              if(mov?.accountId) DB.accounts=DB.accounts.map(a=>a.id===mov.accountId?{...a,balance:a.balance+mov.amount}:a);
+              DB.movements=DB.movements.filter(m=>m.id!==d.movementId);
+            }
+            DB.dues=DB.dues.map(x=>x.id===d.id?{...x,paid:false,movementId:null}:x);
+            saveDB(DB); renderList();
+          } else {
+            openPagarVencimiento(d, renderList);
+          }
+        }
       },d.paid?'↩ Desmarcar':'✓ Pagado');
 
       const gcBtn=h('a',{
@@ -2374,11 +2460,32 @@ function openBackupModal() {
   warn.textContent='💡 Tip: guardá el .json en Google Drive o iCloud para no perderlo.';
   body.appendChild(warn);
 
+  // Resetear app
+  const sep2=h('div',{style:{textAlign:'center',color:G.muted,fontSize:'12px',margin:'14px 0 10px',borderTop:`1px solid ${G.border}`,paddingTop:'14px'}});
+  sep2.textContent='— zona peligrosa —';
+  body.appendChild(sep2);
+
+  const resetBtn=h('button',{
+    class:'btn btn-full',
+    style:{fontSize:'14px',padding:'12px',background:G.redDim,color:G.red,border:`2px solid ${G.red}44`,borderRadius:'11px'},
+    onClick:()=>{
+      if(!confirm('⚠️ ¿Borrar TODOS los datos y empezar de cero?\n\nEsto no se puede deshacer. Asegurate de haber exportado el backup antes.')) return;
+      localStorage.removeItem('finanzas_db');
+      closeModal();
+      location.reload();
+    }
+  },'🗑️ Resetear app (borrar todo)');
+  body.appendChild(resetBtn);
+
   openModal('Backup de datos 💾',body);
 }
 
-renderNav();
-renderContent();
+try {
+  renderNav();
+  renderContent();
+} catch(e) {
+  document.body.innerHTML = '<div style="padding:20px;font-family:sans-serif"><h2>Error al cargar</h2><pre style="font-size:12px;color:red;white-space:pre-wrap">' + e.stack + '</pre></div>';
+}
 
 // Chequear vencimientos al abrir la app
 setTimeout(()=>{ if(window.checkDuesNow) window.checkDuesNow(); }, 2000);
