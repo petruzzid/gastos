@@ -320,9 +320,8 @@ DB.movements.forEach(m=>{
 });
 if(_migrated) saveDB(DB);
 
-// Movimientos "reales": excluye cuotas de tarjeta que aún no se pagaron
-// Estos son los que afectan el balance y aparecen en el historial
-const realMovs = () => DB.movements.filter(m=>!m.pendingCard);
+// Movimientos "reales": excluye cuotas pendientes de tarjeta Y transferencias (para no duplicar en balance)
+const realMovs = () => DB.movements.filter(m=>!m.pendingCard && !m.isTransfer);
 
 let currentTab = 'resumen';
 let activeChart = null;
@@ -578,8 +577,8 @@ function movimientos() {
 
   function renderList() {
     listWrap.innerHTML='';
-    const filtered=[...realMovs()]
-      .filter(m=>(filterType==='todos'||m.type===filterType)&&m.date?.startsWith(filterMonth))
+    const filtered=[...DB.movements.filter(m=>!m.pendingCard)]
+      .filter(m=>(filterType==='todos'||m.type===filterType||(filterType==='todos'&&m.isTransfer))&&m.date?.startsWith(filterMonth))
       .sort((a,b)=>b.date.localeCompare(a.date));
     const totalIn=filtered.filter(m=>m.type==='ingreso').reduce((s,m)=>s+m.amount,0);
     const totalOut=filtered.filter(m=>m.type==='gasto').reduce((s,m)=>s+m.amount,0);
@@ -653,27 +652,84 @@ function delMovimiento(id) {
 }
 
 function openMovForm(onSave) {
-  let form={type:'gasto',description:'',amount:'',currency:'ARS',categoryId:'',date:today(),cardId:'',accountId:'',installments:'1'};
+  let form={type:'gasto',description:'',amount:'',currency:'ARS',categoryId:'',date:today(),cardId:'',accountId:'',accountDestId:'',installments:'1'};
   const body=h('div');
 
   function rebuild() {
     body.innerHTML='';
-    // Tipo
+
+    // Tipo — ahora incluye transferencia
     const typeRow=h('div',{class:'field'},[h('label',{class:'field-label'},'Tipo')]);
     const typePills=h('div',{style:{display:'flex',gap:'8px'}});
-    ['gasto','ingreso'].forEach(t=>{
-      const btn=h('button',{class:'pill'+(form.type===t?' active':''),onClick:()=>{ form.type=t; form.categoryId=''; rebuild(); }},t.charAt(0).toUpperCase()+t.slice(1));
+    [['gasto','Gasto'],['ingreso','Ingreso'],['transferencia','🔄 Transferencia']].forEach(([t,l])=>{
+      const btn=h('button',{class:'pill'+(form.type===t?' active':''),onClick:()=>{ form.type=t; form.categoryId=''; form.cardId=''; rebuild(); }},l);
       typePills.appendChild(btn);
     });
     typeRow.appendChild(typePills);
     body.appendChild(typeRow);
 
-    // Desc
+    if(form.type==='transferencia') {
+      // Formulario simplificado para transferencia
+      const descInp=makeInput({type:'text',placeholder:'Ej: Paso a Nación, Retiro efectivo...',value:form.description});
+      descInp.oninput=e=>form.description=e.target.value;
+      body.appendChild(makeField('Descripción (opcional)',descInp));
+
+      const twoCol=h('div',{class:'two-col'});
+      const amtInp=makeInput({type:'number',placeholder:'0',value:form.amount});
+      amtInp.oninput=e=>form.amount=e.target.value;
+      twoCol.appendChild(h('div',{class:'col-2'},[makeField('Monto',amtInp)]));
+      twoCol.appendChild(makeField('Moneda',makeSelect([['ARS','ARS $'],['USD','USD $']],form.currency,v=>form.currency=v)));
+      body.appendChild(twoCol);
+
+      const dateInp=makeInput({type:'date',value:form.date});
+      dateInp.oninput=e=>form.date=e.target.value;
+      body.appendChild(makeField('Fecha',dateInp));
+
+      // Cuenta origen
+      const origenOpts=[['','Seleccioná cuenta origen'],...DB.accounts.map(a=>[a.id,`${a.icon||'🏦'} ${a.name} (${fmt(a.balance,a.currency)})`])];
+      body.appendChild(makeField('Desde (origen)',makeSelect(origenOpts,form.accountId,v=>form.accountId=v)));
+
+      // Cuenta destino
+      const destOpts=[['','Seleccioná cuenta destino'],...DB.accounts.filter(a=>a.id!==form.accountId).map(a=>[a.id,`${a.icon||'🏦'} ${a.name} (${fmt(a.balance,a.currency)})`])];
+      body.appendChild(makeField('Hacia (destino)',makeSelect(destOpts,form.accountDestId,v=>form.accountDestId=v)));
+
+      // Preview
+      if(form.accountId && form.accountDestId && form.amount) {
+        const orig=DB.accounts.find(a=>a.id===form.accountId);
+        const dest=DB.accounts.find(a=>a.id===form.accountDestId);
+        const prev=h('div',{style:{background:G.accentDim,borderRadius:'10px',padding:'10px 12px',fontSize:'12px',color:G.textSoft}});
+        prev.innerHTML=`<strong>${orig?.name}</strong> → <strong>${dest?.name}</strong><br>
+          <span style="color:${G.red}">−${fmt(Number(form.amount),form.currency)}</span> / <span style="color:${G.green}">+${fmt(Number(form.amount),form.currency)}</span>`;
+        body.appendChild(prev);
+      }
+
+      const btnRow=h('div',{class:'btn-row'});
+      btnRow.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
+      btnRow.appendChild(makeBtn('Transferir',()=>{
+        if(!form.amount||!form.accountId||!form.accountDestId) return;
+        const monto=Number(form.amount);
+        const desc=form.description||`Transferencia a ${DB.accounts.find(a=>a.id===form.accountDestId)?.name}`;
+        // Movimiento salida
+        DB.movements.push({id:uid(),type:'gasto',description:desc,amount:monto,currency:form.currency,date:form.date,accountId:form.accountId,categoryId:'',isTransfer:true,transferPairId:null});
+        // Movimiento entrada
+        DB.movements.push({id:uid(),type:'ingreso',description:desc,amount:monto,currency:form.currency,date:form.date,accountId:form.accountDestId,categoryId:'',isTransfer:true});
+        // Actualizar saldos
+        DB.accounts=DB.accounts.map(a=>{
+          if(a.id===form.accountId) return {...a,balance:a.balance-monto};
+          if(a.id===form.accountDestId) return {...a,balance:a.balance+monto};
+          return a;
+        });
+        saveDB(DB); closeModal(); onSave();
+      },'primary',{full:true}));
+      body.appendChild(btnRow);
+      return;
+    }
+
+    // Gasto / Ingreso — formulario original
     const descInp=makeInput({type:'text',placeholder:'Ej: Netflix, supermercado, sueldo...',value:form.description});
     descInp.oninput=e=>form.description=e.target.value;
     body.appendChild(makeField('Descripción',descInp));
 
-    // Monto + moneda
     const twoCol=h('div',{class:'two-col'});
     const amtInp=makeInput({type:'number',placeholder:'0',value:form.amount});
     amtInp.oninput=e=>form.amount=e.target.value;
@@ -681,7 +737,6 @@ function openMovForm(onSave) {
     twoCol.appendChild(makeField('Moneda',makeSelect([['ARS','ARS $'],['USD','USD $']],form.currency,v=>form.currency=v)));
     body.appendChild(twoCol);
 
-    // Categoría
     const cats=DB.categories.filter(c=>c.type===form.type||c.type==='ambos');
     const catField=h('div',{class:'field'},[h('label',{class:'field-label'},'Categoría')]);
     const catGrid=h('div',{class:'cat-grid'});
@@ -692,25 +747,19 @@ function openMovForm(onSave) {
     catField.appendChild(catGrid);
     body.appendChild(catField);
 
-    // Fecha
     const dateInp=makeInput({type:'date',value:form.date});
     dateInp.oninput=e=>form.date=e.target.value;
     body.appendChild(makeField('Fecha',dateInp));
 
-    // Cuenta
-    body.appendChild(makeField('Cuenta bancaria',makeSelect([['','Sin cuenta'],...DB.accounts.map(a=>[a.id,a.name])],form.accountId,v=>form.accountId=v)));
-
-    // Tarjeta
+    body.appendChild(makeField('Cuenta bancaria',makeSelect([['','Sin cuenta'],...DB.accounts.map(a=>[a.id,`${a.icon||'🏦'} ${a.name}`])],form.accountId,v=>form.accountId=v)));
     body.appendChild(makeField('Tarjeta',makeSelect([['','Efectivo / Sin tarjeta'],...DB.cards.map(c=>[c.id,c.name])],form.cardId,v=>{ form.cardId=v; rebuild(); })));
 
-    // Cuotas
     if(form.cardId&&form.type==='gasto') {
       const cuotaInp=makeInput({type:'number',min:'1',max:'48',value:form.installments});
       cuotaInp.oninput=e=>{ form.installments=e.target.value; };
       body.appendChild(makeField('Cuotas',cuotaInp));
     }
 
-    // Botones
     const btnRow=h('div',{class:'btn-row'});
     btnRow.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
     const saveBtn=makeBtn('Guardar',()=>{ saveMovimiento(form); closeModal(); onSave(); },'primary',{full:true});
