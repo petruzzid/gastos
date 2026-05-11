@@ -487,13 +487,41 @@ function resumen() {
     </div>`:''}`;
   wrap.appendChild(hero);
 
-  // Cuentas
+  // Cuentas — con total y diferencia de caja
   if(DB.accounts.length>0) {
-    wrap.appendChild(h('div',{class:'sec-label'},'Saldo en cuentas'));
+    // Card resumen de cuentas
+    const totalLiqARS = DB.accounts.filter(a=>a.currency==='ARS').reduce((s,a)=>s+a.balance,0);
+    const totalLiqUSD = DB.accounts.filter(a=>a.currency==='USD').reduce((s,a)=>s+a.balance,0);
+
+    // Diferencia de caja: saldo en cuentas vs lo que debería haber según movimientos del mes
+    // (ingresos - gastos del mes). Si hay diferencia, hay movimientos sin registrar.
+    const diffARS = totalLiqARS - net;
+
+    const resumenCuentas=h('div',{class:'card card-pad',style:{marginBottom:'14px',background:`linear-gradient(135deg,${G.accent}0a,${G.accent}04)`}});
+    resumenCuentas.innerHTML=`
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+        <div>
+          <div style="font-size:10px;color:${G.muted};font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:3px">Liquidez total</div>
+          <div class="mono" style="font-size:24px;font-weight:800;color:${totalLiqARS>=0?G.text:G.red}">${fmt(totalLiqARS)}</div>
+          ${totalLiqUSD>0?`<div class="mono" style="font-size:14px;color:${G.muted};margin-top:2px">${fmt(totalLiqUSD,'USD')}</div>`:''}
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:10px;color:${G.muted};font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:3px">Dif. de caja</div>
+          <div class="mono" style="font-size:18px;font-weight:700;color:${Math.abs(diffARS)<100?G.green:diffARS>0?G.yellow:G.red}">${diffARS>=0?'+':''}${fmt(diffARS)}</div>
+          <div style="font-size:10px;color:${G.muted};margin-top:2px">${Math.abs(diffARS)<100?'✓ Cuadra':'vs movim. del mes'}</div>
+        </div>
+      </div>
+      <div style="font-size:11px;color:${G.muted};padding-top:10px;border-top:1px solid ${G.border}">
+        💡 La dif. de caja compara el saldo real de tus cuentas con ingresos - gastos del mes. Si no cuadra, puede haber movimientos sin registrar.
+      </div>`;
+    wrap.appendChild(resumenCuentas);
+
+    wrap.appendChild(h('div',{class:'sec-label'},'Desglose por cuenta'));
     const scr = h('div',{class:'accounts-scroll'});
     DB.accounts.forEach(a => {
       const ac = h('div',{class:'account-card',style:{border:`1.5px solid ${a.color}44`}});
-      ac.innerHTML = `<div style="font-size:11px;color:${a.color};font-weight:700">${a.name}</div>
+      ac.innerHTML = `<div style="font-size:20px;margin-bottom:4px">${a.icon||'🏦'}</div>
+        <div style="font-size:11px;color:${a.color};font-weight:700">${a.name}</div>
         <div class="mono" style="font-size:17px;font-weight:600;margin-top:4px;color:${a.balance>=0?G.text:G.red}">${fmt(a.balance,a.currency)}</div>
         <div style="font-size:10px;color:${G.muted};margin-top:2px">${a.bank}</div>`;
       scr.appendChild(ac);
