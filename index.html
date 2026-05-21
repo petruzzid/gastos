@@ -1823,7 +1823,7 @@ function reportes() {
   if(!months.includes(monthKey())) months.unshift(monthKey());
 
   const tabPills=h('div',{class:'pills'});
-  [['categorias','🍕 Categorías'],['meses','📊 Meses'],['saldo','📈 Saldo'],['tarjetas','💳 Tarjetas'],['cuotas','⏳ Cuotas']].forEach(([val,lbl])=>{
+  [['categorias','🍕 Categ.'],['meses','📊 Meses'],['saldo','📈 Saldo'],['tarjetas','💳 Tarjetas'],['proyeccion','📅 Proyección']].forEach(([val,lbl])=>{
     const btn=h('button',{class:'pill'+(rTab===val?' active':''),onClick:()=>{ rTab=val; tabPills.querySelectorAll('.pill').forEach(b=>b.classList.remove('active')); btn.classList.add('active'); renderReport(); }},lbl);
     tabPills.appendChild(btn);
   });
@@ -1912,17 +1912,121 @@ function reportes() {
       });
     }
 
-    if(rTab==='cuotas') {
-      const installData=DB.cards.map(c=>{ const pending=DB.movements.filter(m=>m.cardId===c.id&&m.type==='gasto'&&m.date>today()); const byMonth={}; pending.forEach(m=>{ const mk=m.date.slice(0,7); byMonth[mk]=(byMonth[mk]||0)+m.amount; }); return {card:c,pending,total:pending.reduce((s,m)=>s+m.amount,0),byMonth}; }).filter(c=>c.total>0);
-      if(installData.length===0){ reportArea.appendChild(makeCard(h('div',{class:'empty'},'Sin cuotas pendientes 🎉'))); return; }
-      installData.forEach(({card,pending,total,byMonth})=>{
-        const c=h('div',{class:'card card-pad',style:{marginBottom:'12px',border:`1.5px solid ${card.color}44`}});
-        c.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><span style="font-weight:800;font-size:16px;color:${card.color}">${card.name}</span>
-          <span class="tag" style="background:${G.yellowDim};color:${G.yellow};border:1px solid ${G.yellow}30">Total: ${fmt(total)}</span></div>
-          ${Object.entries(byMonth).sort(([a],[b])=>a.localeCompare(b)).map(([mk,amt])=>`<div class="table-row"><span style="font-size:13px;color:${G.textSoft}">${monthLabel(mk)}</span><span class="mono" style="font-size:13px;color:${G.yellow};font-weight:600">${fmt(amt)}</span></div>`).join('')}
-          <div style="font-size:11px;color:${G.muted};margin-top:10px">${pending.length} cuotas en ${Object.keys(byMonth).length} meses</div>`;
-        reportArea.appendChild(c);
-      });
+    if(rTab==='proyeccion') {
+      // Selector de mes — mostrar los próximos 12 meses + meses con historial
+      const allMonths=new Set();
+      // Agregar meses de cuotas pendientes
+      DB.movements.filter(m=>m.pendingCard).forEach(m=>{ if(m.date) allMonths.add(m.date.slice(0,7)); });
+      // Agregar meses de vencimientos
+      DB.dues.filter(d=>!d.paid).forEach(d=>{ if(d.dueDate) allMonths.add(d.dueDate.slice(0,7)); });
+      // Agregar próximos 6 meses
+      for(let i=0;i<6;i++){ const d=new Date(); d.setMonth(d.getMonth()+i); allMonths.add(monthKey(d)); }
+      const sortedMonths=[...allMonths].sort();
+      if(!sortedMonths.includes(month)) sortedMonths.unshift(month);
+
+      // Selector de mes
+      const monthSel=h('div',{style:{marginBottom:'14px'}});
+      monthSel.appendChild(makeField('Ver proyección de',makeSelect(sortedMonths.map(m=>[m,monthLabel(m)]),month,v=>{ month=v; renderReport(); })));
+      reportArea.appendChild(monthSel);
+
+      // ── Cuotas de tarjetas para ese mes ──────────────────────────────────
+      const cardMovs=DB.movements.filter(m=>m.cardId&&m.date?.startsWith(month));
+      const cardData=DB.cards.map(card=>{
+        const movs=cardMovs.filter(m=>m.cardId===card.id);
+        const total=movs.reduce((s,m)=>s+m.amount,0);
+        return {card,movs,total};
+      }).filter(d=>d.total>0);
+
+      if(cardData.length>0) {
+        const secTitle=h('div',{class:'sec-label',style:{marginTop:'4px'}});
+        secTitle.textContent='💳 Compromisos de tarjetas';
+        reportArea.appendChild(secTitle);
+
+        let grandTotal=0;
+        cardData.forEach(({card,movs,total})=>{
+          grandTotal+=total;
+          const c=h('div',{class:'card card-pad',style:{marginBottom:'10px',border:`1.5px solid ${card.color}33`}});
+
+          // Header tarjeta
+          const hdr=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'10px'}});
+          hdr.innerHTML=`<span style="font-weight:800;font-size:15px;color:${card.color}">${card.name}</span>
+            <span class="mono" style="font-size:18px;font-weight:700;color:${card.color}">${fmt(total,card.currency)}</span>`;
+          c.appendChild(hdr);
+
+          // Lista de cuotas
+          movs.sort((a,b)=>a.description?.localeCompare(b.description||'')||0).forEach(m=>{
+            const isPending=!!m.pendingCard;
+            const row=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderTop:`1px solid ${G.border}`,fontSize:'12px'}});
+            row.innerHTML=`<div>
+              <span style="color:${G.textSoft}">${m.description||'Gasto'}</span>
+              ${isPending?`<span style="font-size:10px;background:${G.yellowDim};color:${G.yellow};border-radius:4px;padding:1px 5px;margin-left:4px;font-weight:700">pendiente</span>`:`<span style="font-size:10px;background:${G.greenDim};color:${G.green};border-radius:4px;padding:1px 5px;margin-left:4px;font-weight:700">registrado</span>`}
+            </div>
+            <span class="mono" style="font-weight:700;color:${isPending?G.yellow:G.textSoft}">${fmt(m.amount,m.currency||card.currency)}</span>`;
+            c.appendChild(row);
+          });
+
+          reportArea.appendChild(c);
+        });
+
+        // Total tarjetas
+        const totalCard=h('div',{style:{background:G.yellowDim,borderRadius:'12px',padding:'12px 14px',marginBottom:'14px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
+        totalCard.innerHTML=`<span style="font-weight:700;color:${G.yellow}">Total a pagar en tarjetas</span>
+          <span class="mono" style="font-size:20px;font-weight:800;color:${G.yellow}">${fmt(grandTotal)}</span>`;
+        reportArea.appendChild(totalCard);
+      } else {
+        const noCard=makeCard(h('div',{style:{textAlign:'center',padding:'8px',color:G.muted,fontSize:'13px'}},'Sin cuotas de tarjeta para este mes 🎉'));
+        reportArea.appendChild(noCard);
+      }
+
+      // ── Vencimientos del mes ─────────────────────────────────────────────
+      const duesMes=DB.dues.filter(d=>d.dueDate?.startsWith(month));
+      if(duesMes.length>0) {
+        const secTitle2=h('div',{class:'sec-label',style:{marginTop:'8px'}});
+        secTitle2.textContent='🗓️ Vencimientos del mes';
+        reportArea.appendChild(secTitle2);
+
+        let duesTotal=0;
+        duesMes.forEach(d=>{
+          duesTotal+=d.amount||0;
+          const diff=Math.ceil((new Date(d.dueDate)-new Date())/86400000);
+          const c=h('div',{class:'card card-pad',style:{marginBottom:'8px',border:`1.5px solid ${d.paid?G.green+'44':diff<0?G.red+'44':G.border}`,opacity:d.paid?'.7':'1'}});
+          c.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <div style="font-weight:700;font-size:14px;text-decoration:${d.paid?'line-through':'none'};color:${d.paid?G.muted:G.text}">${d.name}</div>
+              <div style="font-size:11px;color:${G.muted};margin-top:2px">${d.category} · ${fmtDate(d.dueDate)}${d.bank?' · '+d.bank:''}</div>
+            </div>
+            <div style="text-align:right">
+              <div class="mono" style="font-weight:700;font-size:16px;color:${d.paid?G.green:G.red}">${fmt(d.amount,d.currency)}</div>
+              <div style="font-size:11px;margin-top:2px;color:${d.paid?G.green:G.muted}">${d.paid?'✓ Pagado':diff<0?'Vencido':diff===0?'Hoy':'En '+diff+'d'}</div>
+            </div>
+          </div>`;
+          reportArea.appendChild(c);
+        });
+
+        const duesTotal2=duesMes.filter(d=>!d.paid).reduce((s,d)=>s+(d.amount||0),0);
+        if(duesTotal2>0) {
+          const totalDues=h('div',{style:{background:G.redDim,borderRadius:'12px',padding:'12px 14px',marginBottom:'14px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
+          totalDues.innerHTML=`<span style="font-weight:700;color:${G.red}">Total vencimientos pendientes</span>
+            <span class="mono" style="font-size:20px;font-weight:800;color:${G.red}">${fmt(duesTotal2)}</span>`;
+          reportArea.appendChild(totalDues);
+        }
+      }
+
+      // ── Resumen total del mes ─────────────────────────────────────────────
+      const totalTarjetas=cardData.reduce((s,d)=>s+d.total,0);
+      const totalVencPend=duesMes.filter(d=>!d.paid).reduce((s,d)=>s+(d.amount||0),0);
+      const granTotal=totalTarjetas+totalVencPend;
+
+      if(granTotal>0) {
+        const resDiv=h('div',{style:{background:`linear-gradient(135deg,${G.accent},${G.accentDark})`,borderRadius:'16px',padding:'16px',color:'#fff',marginTop:'4px'}});
+        resDiv.innerHTML=`<div style="font-size:11px;color:rgba(255,255,255,.75);font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Total a prever en ${monthLabel(month)}</div>
+          <div class="mono" style="font-size:28px;font-weight:800">${fmt(granTotal)}</div>
+          <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">
+            ${totalTarjetas>0?`<div><div style="font-size:10px;color:rgba(255,255,255,.6)">Tarjetas</div><div class="mono" style="font-size:14px;font-weight:700">${fmt(totalTarjetas)}</div></div>`:''}
+            ${totalVencPend>0?`<div><div style="font-size:10px;color:rgba(255,255,255,.6)">Vencimientos</div><div class="mono" style="font-size:14px;font-weight:700">${fmt(totalVencPend)}</div></div>`:''}
+          </div>`;
+        reportArea.appendChild(resDiv);
+      }
     }
   }
 
